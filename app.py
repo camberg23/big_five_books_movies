@@ -1,15 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from sklearn.metrics.pairwise import euclidean_distances
 
-# -------------
-# CONFIG
-# -------------
-BOOKS_DIST_CSV = "books_distances.csv"
-MOVIES_DIST_CSV = "movies_distances.csv"
+# -----------------------------------
+# CONFIG / CONSTANTS
+# -----------------------------------
 BOOKS_CSV = "books_popular_ocean.csv"
 MOVIES_CSV = "movies_popular_ocean.csv"
 
+# Column names for the personality embeddings
 OCEAN_COLS = [
     "mean_Openness", 
     "mean_Conscientiousness", 
@@ -18,128 +18,149 @@ OCEAN_COLS = [
     "mean_Neuroticism"
 ]
 
-# -------------
-# APP START
-# -------------
-
+# -----------------------------------
+# DATA LOADING & CACHE
+# -----------------------------------
+@st.cache_data
 def load_data():
-    # Distances
-    df_books_dist = pd.read_csv(BOOKS_DIST_CSV)
-    df_movies_dist = pd.read_csv(MOVIES_DIST_CSV)
-
-    # Original OCEAN info
+    """Load books and movies DataFrames."""
     df_books = pd.read_csv(BOOKS_CSV)
     df_movies = pd.read_csv(MOVIES_CSV)
+    return df_books, df_movies
+
+def get_item_vector(df, item_name):
+    """
+    Given a DataFrame (books or movies) and an item_name,
+    return the OCEAN embedding as a 1D numpy array.
+    If item not found, returns None.
+    """
+    row = df.loc[df["item"] == item_name]
+    if row.empty:
+        return None
+    return row[OCEAN_COLS].values[0]  # [0] to get as 1D
+
+def compute_distances(base_vector, df):
+    """
+    For each item in df, compute Euclidean distance 
+    from base_vector, return a new DataFrame with columns:
+    [item, distance].
+    """
+    # Extract all vectors in df
+    vectors = df[OCEAN_COLS].values  # shape (num_items, 5)
     
-    return df_books, df_movies, df_books_dist, df_movies_dist
+    # Reshape base_vector to (1, 5) so sklearn can handle it
+    base_vector_2d = base_vector.reshape(1, -1)
 
-@st.cache_data
-def get_item_distances(item_name, df_dist):
-    """
-    Given an item name and a DF of distances (long form),
-    return a dataframe with columns [item2, distance],
-    sorted by ascending distance.
-    """
-    subset = df_dist[df_dist["item1"] == item_name].copy()
-    subset.sort_values(by="distance", ascending=True, inplace=True)
-    return subset[["item2", "distance"]]
+    # Compute distances for each item
+    distances = euclidean_distances(base_vector_2d, vectors)[0]  # shape (num_items,)
 
+    # Build a DataFrame
+    dist_df = pd.DataFrame({
+        "item": df["item"],
+        "distance": distances
+    })
+    return dist_df
 
+# -----------------------------------
+# STREAMLIT APP
+# -----------------------------------
 def main():
-    st.title("Personality-Based Book/Movie Similarity")
+    st.title("Personality-Based Book/Movie Similarity (Lightweight)")
 
-    # Load all data
-    df_books, df_movies, df_books_dist, df_movies_dist = load_data()
+    # Load the CSV data
+    df_books, df_movies = load_data()
 
-    # ---------------------------------------
-    # Side Panel: Selections
-    # ---------------------------------------
     st.sidebar.header("Search Settings")
 
-    # 1) Choose base item type: Book or Movie
+    # 1) Choose the base item type: Book or Movie
     item_type = st.sidebar.radio(
         "Pick type of base item:",
         ("Books", "Movies")
     )
 
-    # 2) Choose which item from that type
+    # 2) Build the list of items from that type
     if item_type == "Books":
-        all_items = df_books["item"].unique()
-    else:  # "Movies"
-        all_items = df_movies["item"].unique()
-    
+        all_items = sorted(df_books["item"].unique())
+        df_base = df_books
+    else:
+        all_items = sorted(df_movies["item"].unique())
+        df_base = df_movies
+
+    # 3) Choose which item from that type
     selected_item = st.sidebar.selectbox(
-        f"Select a {item_type[:-1]} from the list:",  # "Book" or "Movie"
-        sorted(all_items)
+        f"Select a {item_type[:-1]}:",
+        all_items
     )
 
-    # 3) Number of items to display (N)
+    # 4) Number of items to display
     N = st.sidebar.slider("Number of items to show:", min_value=1, max_value=20, value=5)
 
-    # 4) Similar or Different?
+    # 5) Similar or Different
     similarity_mode = st.sidebar.radio(
-        "Do you want the most similar or the most different items?",
+        "Show most similar or most different?",
         ("Similar", "Different")
     )
 
-    # 5) Which types of items to compare against?
+    # 6) Which types of items to compare against?
     compare_options = st.sidebar.multiselect(
         "Compare against which categories?",
         ["Books", "Movies"],
         default=["Books", "Movies"]
     )
 
-    # ---------------------------------------
-    # MAIN LOGIC
-    # ---------------------------------------
-    # Retrieve relevant distance DF 
-    if item_type == "Books":
-        df_dist = df_books_dist
-    else:
-        df_dist = df_movies_dist
+    # --------------------------------------
+    # COMPUTE ON THE FLY
+    # --------------------------------------
+    # 1) Get the selected item's vector
+    base_vector = get_item_vector(df_base, selected_item)
+    if base_vector is None:
+        st.error(f"Could not find {selected_item} in {item_type}.")
+        return
 
-    # Get all distances from the selected item
-    dist_subset = get_item_distances(selected_item, df_dist)
+    # 2) For each category in compare_options, compute distances
+    result_frames = []
+    if "Books" in compare_options:
+        # compute distance from selected_item -> all books
+        dist_books = compute_distances(base_vector, df_books)
+        # drop the item itself if it's in that set
+        dist_books = dist_books[dist_books["item"] != selected_item]
+        # tag them as "Book"
+        dist_books["category"] = "Book"
+        result_frames.append(dist_books)
+    if "Movies" in compare_options:
+        # compute distance from selected_item -> all movies
+        dist_movies = compute_distances(base_vector, df_movies)
+        dist_movies = dist_movies[dist_movies["item"] != selected_item]
+        dist_movies["category"] = "Movie"
+        result_frames.append(dist_movies)
 
-    # If user wants to see the most different items, sort descending
-    if similarity_mode == "Different":
-        dist_subset = dist_subset.sort_values(by="distance", ascending=False)
+    # Combine them
+    if len(result_frames) == 0:
+        st.warning("No categories selected to compare against.")
+        return
+    df_results = pd.concat(result_frames, ignore_index=True)
 
-    # Now filter to items from the desired categories
-    # If the user wants to see Books only, we filter 'item2' that is in df_books['item'] 
-    # If the user wants to see Movies only, we filter 'item2' that is in df_movies['item'] 
-    # If both, we keep all
-    valid_items_books = set(df_books["item"])
-    valid_items_movies = set(df_movies["item"])
+    # 3) Sort by ascending distance for "similar," or descending for "different"
+    ascending = True if similarity_mode == "Similar" else False
+    df_results.sort_values(by="distance", ascending=ascending, inplace=True)
 
-    def is_valid(item2):
-        is_book = item2 in valid_items_books
-        is_movie = item2 in valid_items_movies
-        if "Books" in compare_options and is_book:
-            return True
-        if "Movies" in compare_options and is_movie:
-            return True
-        return False
+    # 4) Take top N
+    df_top = df_results.head(N)
 
-    dist_subset = dist_subset[dist_subset["item2"].apply(is_valid)]
-
-    # Finally, take the top N results
-    dist_subset = dist_subset.head(N)
-
-    # ---------------------------------------
+    # --------------------------------------
     # DISPLAY
-    # ---------------------------------------
-    st.write(f"### Results for {item_type[:-1]}: **{selected_item}**")
+    # --------------------------------------
+    st.subheader(f"Selected {item_type[:-1]}: {selected_item}")
     if similarity_mode == "Similar":
-        st.write(f"Showing **{N}** most similar items among **{compare_options}**.")
+        st.write(f"Showing **{N}** most similar items from: {', '.join(compare_options)}")
     else:
-        st.write(f"Showing **{N}** most different items among **{compare_options}**.")
+        st.write(f"Showing **{N}** most different items from: {', '.join(compare_options)}")
 
-    # Display results table
-    st.dataframe(dist_subset.rename(columns={"item2": "Item", "distance": "Distance"}))
+    # Display in table
+    # You can rename columns or add more info if you like
+    st.dataframe(df_top[["item", "category", "distance"]])
 
-    st.write("You can adjust the selection in the sidebar to see different results.")
-
+    st.write("Use the sidebar to change settings.")
 
 if __name__ == "__main__":
     main()
