@@ -126,7 +126,7 @@ def compute_distances(base_vector, df):
 # STREAMLIT APP
 # ------------------------------------------------------------------
 def main():
-    st.title("Personality-Based Book/Movie Similarity (Fuzzy Deduped)")
+    st.title("Book/Movie Similarity by Big Five Scores")
 
     # --- Load data (cached) ---
     df_books, df_movies = load_data()
@@ -255,7 +255,6 @@ def main():
         fig.update_layout(xaxis_title="OCEAN Trait", yaxis_title="Score")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.write("Use the sidebar to change settings.")
 
 if __name__ == "__main__":
     main()
