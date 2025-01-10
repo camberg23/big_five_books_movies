@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import euclidean_distances
+import plotly.express as px
 
 # ------------------------------------------------------------------
 # CONFIG / CONSTANTS
@@ -9,7 +10,7 @@ from sklearn.metrics.pairwise import euclidean_distances
 BOOKS_CSV = "books_popular_ocean.csv"
 MOVIES_CSV = "movies_popular_ocean.csv"
 
-# Column names for personality embeddings
+# OCEAN columns (already normalized in your data, presumably)
 OCEAN_COLS = [
     "mean_Openness", 
     "mean_Conscientiousness", 
@@ -27,7 +28,7 @@ def load_data():
     df_books = pd.read_csv(BOOKS_CSV)
     df_movies = pd.read_csv(MOVIES_CSV)
 
-    # Convert NaNs or floats in 'item' to empty string, then ensure type str
+    # Convert NaNs/floats in 'item' to empty strings, then ensure type str
     df_books["item"] = df_books["item"].fillna("").astype(str)
     df_movies["item"] = df_movies["item"].fillna("").astype(str)
 
@@ -47,30 +48,18 @@ def get_item_vector(df, item_name):
 def compute_distances(base_vector, df):
     """
     For each item in df, compute Euclidean distance 
-    from base_vector, return a DataFrame with:
+    from base_vector, return a DataFrame with columns:
     [item, distance].
     """
-    # All vectors
     vectors = df[OCEAN_COLS].values  # shape: (num_items, 5)
-
-    # Reshape base_vector to (1, 5) for sklearn
     base_vector_2d = base_vector.reshape(1, -1)
-
-    # Euclidean distances to each row
     distances = euclidean_distances(base_vector_2d, vectors)[0]  # shape: (num_items,)
-
+    
     dist_df = pd.DataFrame({
         "item": df["item"],
         "distance": distances
     })
     return dist_df
-
-def normalize_ocean_scores(row, global_min, global_max):
-    """
-    Given a Series of OCEAN values, min, and max for each trait,
-    return normalized (0 to 1) scores.
-    """
-    return (row - global_min) / (global_max - global_min)
 
 # ------------------------------------------------------------------
 # STREAMLIT APP
@@ -78,13 +67,8 @@ def normalize_ocean_scores(row, global_min, global_max):
 def main():
     st.title("Personality-Based Book/Movie Similarity")
 
-    # --- Load data once (cached) ---
+    # --- Load data (cached) ---
     df_books, df_movies = load_data()
-
-    # Compute global min/max for OCEAN across both sets (for normalization)
-    combined_ocean = pd.concat([df_books[OCEAN_COLS], df_movies[OCEAN_COLS]], ignore_index=True)
-    global_min = combined_ocean.min()
-    global_max = combined_ocean.max()
 
     # -----------------------
     # SIDEBAR SELECTION
@@ -97,11 +81,11 @@ def main():
         ("Books", "Movies")
     )
 
-    # 2) Build the list of valid items (exclude blanks)
+    # 2) Get valid items (exclude blanks)
     if item_type == "Books":
         valid_items = [x for x in df_books["item"].unique() if x.strip() != ""]
         df_base = df_books
-    else:  # Movies
+    else:
         valid_items = [x for x in df_movies["item"].unique() if x.strip() != ""]
         df_base = df_movies
 
@@ -128,18 +112,18 @@ def main():
     # -----------------------
     # MAIN LOGIC
     # -----------------------
-    # A) Get base item vector
+    #  A) Get the base item vector
     base_vector = get_item_vector(df_base, selected_item)
     if base_vector is None:
         st.error(f"Could not find '{selected_item}' in '{item_type}'.")
         return
 
-    # B) For each category in compare_options, compute distances
+    #  B) Compute distances on the fly for each chosen category
     result_frames = []
 
     if "Books" in compare_options:
         dist_books = compute_distances(base_vector, df_books)
-        # Remove the item itself if it's in the same set
+        # Remove the item itself if it appears in the same category
         dist_books = dist_books[dist_books["item"] != selected_item]
         dist_books["category"] = "Book"
         result_frames.append(dist_books)
@@ -174,38 +158,53 @@ def main():
     else:
         st.write(f"Showing **{N}** most different items from: {', '.join(compare_options)}.")
 
-    # Show a table of the top results
+    # A) Show the table
     st.dataframe(df_top[["item", "category", "distance"]])
 
-    # Plot normalized OCEAN scores for each returned item
-    st.write("### OCEAN Profiles for Each Returned Item")
-    for i, row in df_top.iterrows():
+    # B) Create a single multi-bar chart with Plotly
+    #    X-axis = OCEAN traits, Y-axis = score. 
+    #    Each item has one bar per trait, grouped by trait.
+    df_plot_rows = []
+    for _, row in df_top.iterrows():
         item_name = row["item"]
         category = row["category"]
-        dist_val = row["distance"]
-
-        # Find that item's row in either df_books or df_movies
+        # Find the item in the appropriate df
         if category == "Book":
             df_source = df_books
         else:
             df_source = df_movies
 
-        row_data = df_source.loc[df_source["item"] == item_name]
-        if row_data.empty:
-            st.write(f"**{item_name}** (No OCEAN data found)")
+        this_item_row = df_source[df_source["item"] == item_name]
+        if this_item_row.empty:
             continue
 
-        # Extract OCEAN scores
-        ocean_scores = row_data[OCEAN_COLS].iloc[0]
-        # Normalize
-        normalized_scores = normalize_ocean_scores(ocean_scores, global_min, global_max)
+        # Extract the 5 OCEAN scores
+        ocean_values = this_item_row[OCEAN_COLS].iloc[0]
+        # Build the row structure for each trait
+        for trait_col in OCEAN_COLS:
+            # Remove "mean_" prefix just for a cleaner trait label
+            trait_label = trait_col.replace("mean_", "")
+            df_plot_rows.append({
+                "Item": item_name,
+                "Trait": trait_label,
+                "Score": ocean_values[trait_col]
+            })
 
-        st.subheader(f"{item_name} ({category}, Distance={dist_val:.2f})")
-        
-        # Prepare a 1-row DataFrame for plotting with st.bar_chart
-        # columns = traits, single row of normalized values
-        df_chart = pd.DataFrame([normalized_scores.values], columns=normalized_scores.index)
-        st.bar_chart(df_chart)
+    df_plot = pd.DataFrame(df_plot_rows)
+
+    # Generate grouped bar plot with Plotly
+    if not df_plot.empty:
+        fig = px.bar(
+            df_plot,
+            x="Trait",
+            y="Score",
+            color="Item",
+            barmode="group",
+            hover_name="Item",
+            title="Comparison of OCEAN Traits across Returned Items",
+        )
+        fig.update_layout(xaxis_title="OCEAN Trait", yaxis_title="Score")
+        st.plotly_chart(fig, use_container_width=True)
 
     st.write("Use the sidebar to change the settings.")
 
