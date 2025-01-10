@@ -24,13 +24,39 @@ OCEAN_COLS = [
 # ------------------------------------------------------------------
 @st.cache_data
 def load_data():
-    """Load books and movies data, ensuring 'item' is always a string."""
+    """Load books and movies data, ensuring 'item' is always a unique string."""
     df_books = pd.read_csv(BOOKS_CSV)
     df_movies = pd.read_csv(MOVIES_CSV)
 
-    # Convert NaNs/floats in 'item' to empty strings, then ensure type str
+    # 1) Ensure 'item' is string, fill NaNs
     df_books["item"] = df_books["item"].fillna("").astype(str)
     df_movies["item"] = df_movies["item"].fillna("").astype(str)
+
+    # 2) Strip whitespace
+    df_books["item"] = df_books["item"].str.strip()
+    df_movies["item"] = df_movies["item"].str.strip()
+
+    # 3) Drop empty items
+    df_books = df_books[df_books["item"] != ""]
+    df_movies = df_movies[df_movies["item"] != ""]
+
+    # 4) Drop duplicates on 'item', keeping first
+    df_books.drop_duplicates(subset="item", keep="first", inplace=True)
+    df_movies.drop_duplicates(subset="item", keep="first", inplace=True)
+
+    #    If you have multiple rows for the same item with *different* OCEAN 
+    #    scores, consider groupby + mean or another strategy, e.g.:
+    #
+    #    df_books = df_books.groupby("item", as_index=False).agg({
+    #        "count": "sum",
+    #        "mean_Openness": "mean",
+    #        "mean_Conscientiousness": "mean",
+    #        "mean_Extraversion": "mean",
+    #        "mean_Agreeableness": "mean",
+    #        "mean_Neuroticism": "mean"
+    #    })
+    #
+    #    Same for df_movies if needed.
 
     return df_books, df_movies
 
@@ -81,17 +107,15 @@ def main():
         ("Books", "Movies")
     )
 
-    # 2) Get valid items (exclude blanks)
+    # 2) Build the dropdown list of valid items (now deduplicated & stripped)
     if item_type == "Books":
-        valid_items = [x for x in df_books["item"].unique() if x.strip() != ""]
+        valid_items = sorted(df_books["item"].unique())
         df_base = df_books
     else:
-        valid_items = [x for x in df_movies["item"].unique() if x.strip() != ""]
+        valid_items = sorted(df_movies["item"].unique())
         df_base = df_movies
 
-    # Sort them for the dropdown
-    all_items = sorted(valid_items)
-    selected_item = st.sidebar.selectbox(f"Select a {item_type[:-1]}:", all_items)
+    selected_item = st.sidebar.selectbox(f"Select a {item_type[:-1]}:", valid_items)
 
     # 3) Number of items to show
     N = st.sidebar.slider("Number of items to show:", min_value=1, max_value=20, value=5)
@@ -112,18 +136,17 @@ def main():
     # -----------------------
     # MAIN LOGIC
     # -----------------------
-    #  A) Get the base item vector
+    # A) Get the base item vector
     base_vector = get_item_vector(df_base, selected_item)
     if base_vector is None:
         st.error(f"Could not find '{selected_item}' in '{item_type}'.")
         return
 
-    #  B) Compute distances on the fly for each chosen category
+    # B) Compute distances on the fly for each chosen category
     result_frames = []
 
     if "Books" in compare_options:
         dist_books = compute_distances(base_vector, df_books)
-        # Remove the item itself if it appears in the same category
         dist_books = dist_books[dist_books["item"] != selected_item]
         dist_books["category"] = "Book"
         result_frames.append(dist_books)
@@ -138,7 +161,7 @@ def main():
         st.warning("No categories selected to compare against.")
         return
 
-    # Combine into a single DataFrame
+    # Combine results
     df_results = pd.concat(result_frames, ignore_index=True)
 
     # Sort ascending for "similar" or descending for "different"
@@ -162,37 +185,35 @@ def main():
     st.dataframe(df_top[["item", "category", "distance"]])
 
     # B) Create a single multi-bar chart with Plotly
-    #    X-axis = OCEAN traits, Y-axis = score. 
-    #    Each item has one bar per trait, grouped by trait.
     df_plot_rows = []
     for _, row in df_top.iterrows():
         item_name = row["item"]
         category = row["category"]
-        # Find the item in the appropriate df
+
+        # Find the item in the correct df
         if category == "Book":
             df_source = df_books
         else:
             df_source = df_movies
 
-        this_item_row = df_source[df_source["item"] == item_name]
-        if this_item_row.empty:
+        item_row = df_source[df_source["item"] == item_name]
+        if item_row.empty:
             continue
 
-        # Extract the 5 OCEAN scores
-        ocean_values = this_item_row[OCEAN_COLS].iloc[0]
-        # Build the row structure for each trait
+        # Extract the OCEAN scores
+        ocean_scores = item_row[OCEAN_COLS].iloc[0]
+
+        # Build a row structure for each trait
         for trait_col in OCEAN_COLS:
-            # Remove "mean_" prefix just for a cleaner trait label
             trait_label = trait_col.replace("mean_", "")
             df_plot_rows.append({
                 "Item": item_name,
                 "Trait": trait_label,
-                "Score": ocean_values[trait_col]
+                "Score": ocean_scores[trait_col]
             })
 
     df_plot = pd.DataFrame(df_plot_rows)
 
-    # Generate grouped bar plot with Plotly
     if not df_plot.empty:
         fig = px.bar(
             df_plot,
@@ -201,7 +222,7 @@ def main():
             color="Item",
             barmode="group",
             hover_name="Item",
-            title="Comparison of OCEAN Traits across Returned Items",
+            title="Comparison of OCEAN Traits Across Returned Items",
         )
         fig.update_layout(xaxis_title="OCEAN Trait", yaxis_title="Score")
         st.plotly_chart(fig, use_container_width=True)
