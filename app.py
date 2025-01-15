@@ -13,7 +13,7 @@ from rapidfuzz.distance import Levenshtein
 BOOKS_CSV = "books_popular_ocean.csv"
 MOVIES_CSV = "movies_popular_ocean.csv"
 
-# OCEAN columns (already normalized in your data, presumably)
+# OCEAN columns (already normalized in your data)
 OCEAN_COLS = [
     "mean_Openness", 
     "mean_Conscientiousness", 
@@ -39,33 +39,27 @@ def fuzzy_deduplicate_items(df, col="item", distance_threshold=2):
       4. Remap all items in df to their canonical forms.
       5. Drop duplicates so each final item name appears only once.
     """
-    # Get unique items in ascending order
     items = list(df[col].unique())
     items.sort()
 
-    canonical_items = []     # distinct 'master' strings
-    item_to_canonical = {}   # map each original -> canonical
+    canonical_items = []
+    item_to_canonical = {}
 
     for it in items:
         matched_canonical = None
         for c in canonical_items:
-            dist = Levenshtein.distance(it, c)  
+            dist = Levenshtein.distance(it, c)
             if dist <= distance_threshold:
                 matched_canonical = c
                 break
         
         if matched_canonical is not None:
-            # We found a canonical item close enough to 'it'
             item_to_canonical[it] = matched_canonical
         else:
-            # it becomes a new canonical item
             canonical_items.append(it)
             item_to_canonical[it] = it
 
-    # Remap all items in df to the canonical forms
     df[col] = df[col].apply(lambda x: item_to_canonical[x])
-
-    # Drop duplicates (keeping the first row for each canonical item)
     df.drop_duplicates(subset=col, keep="first", inplace=True)
 
     return df
@@ -96,31 +90,16 @@ def load_data():
     return df_books, df_movies
 
 def get_item_vector(df, item_name):
-    """
-    Given a DataFrame (books or movies) and an item_name,
-    return that row's OCEAN embedding as a 1D numpy array.
-    If not found, return None.
-    """
     row = df.loc[df["item"] == item_name]
     if row.empty:
         return None
-    return row[OCEAN_COLS].values[0]  # shape: (5,)
+    return row[OCEAN_COLS].values[0]
 
 def compute_distances(base_vector, df):
-    """
-    For each item in df, compute Euclidean distance 
-    from base_vector, return a DataFrame with columns:
-      [item, distance].
-    """
-    vectors = df[OCEAN_COLS].values  # shape: (num_items, 5)
+    vectors = df[OCEAN_COLS].values
     base_vector_2d = base_vector.reshape(1, -1)
-    distances = euclidean_distances(base_vector_2d, vectors)[0]  # shape: (num_items,)
-    
-    dist_df = pd.DataFrame({
-        "item": df["item"],
-        "distance": distances
-    })
-    return dist_df
+    distances = euclidean_distances(base_vector_2d, vectors)[0]
+    return pd.DataFrame({"item": df["item"], "distance": distances})
 
 # ------------------------------------------------------------------
 # STREAMLIT APP
@@ -131,9 +110,16 @@ def main():
     # --- Load data (cached) ---
     df_books, df_movies = load_data()
 
-    # ---------------------------------
-    #  Mode Selection
-    # ---------------------------------
+    # ---- DEBUG: Print shapes & heads after loading ----
+    st.write("## Debug: Data after Loading & Fuzzy Dedup")
+    st.write("### Books")
+    st.write(f"df_books shape: {df_books.shape}")
+    st.write(df_books.head(10))
+
+    st.write("### Movies")
+    st.write(f"df_movies shape: {df_movies.shape}")
+    st.write(df_movies.head(10))
+
     mode = st.sidebar.radio(
         "Choose a Mode:",
         ["Find Similar Items", "Sort by Trait"]
@@ -145,16 +131,13 @@ def main():
         show_sort_by_trait(df_books, df_movies)
 
 def show_find_similar_items(df_books, df_movies):
-    """Existing functionality: pick an item, find most similar/different."""
     st.sidebar.header("Find Similar Items")
 
-    # 1) Choose base item type: Book or Movie
     item_type = st.sidebar.radio(
         "Pick type of base item:",
         ("Books", "Movies")
     )
 
-    # 2) Build the dropdown of valid items (sorted)
     if item_type == "Books":
         valid_items = sorted(df_books["item"].unique())
         df_base = df_books
@@ -163,32 +146,26 @@ def show_find_similar_items(df_books, df_movies):
         df_base = df_movies
 
     selected_item = st.sidebar.selectbox(f"Select a {item_type[:-1]}:", valid_items)
-
-    # 3) Number of items to show
     N = st.sidebar.slider("Number of items to show:", min_value=1, max_value=20, value=5)
-
-    # 4) Similar or Different
     similarity_mode = st.sidebar.radio(
         "Show most similar or most different?",
         ("Similar", "Different")
     )
-
-    # 5) Compare to Books, Movies, or Both
     compare_options = st.sidebar.multiselect(
         "Compare against which categories?",
         ["Books", "Movies"],
         default=["Books", "Movies"]
     )
 
-    # --- Main logic ---
+    # --- Debug Info ---
+    st.write("### Debug: 'Find Similar Items' Setup")
+    st.write(f"Base item type: {item_type}, selected item: {selected_item}")
 
-    # Get the base item vector
     base_vector = get_item_vector(df_base, selected_item)
     if base_vector is None:
         st.error(f"Could not find '{selected_item}' in '{item_type}'.")
         return
 
-    # Compute distances on the fly for each chosen category
     result_frames = []
 
     if "Books" in compare_options:
@@ -209,11 +186,8 @@ def show_find_similar_items(df_books, df_movies):
 
     df_results = pd.concat(result_frames, ignore_index=True)
 
-    # Sort ascending for "Similar" or descending for "Different"
     ascending = (similarity_mode == "Similar")
     df_results.sort_values("distance", ascending=ascending, inplace=True)
-
-    # Take top N
     df_top = df_results.head(N)
 
     st.subheader(f"Selected {item_type[:-1]}: {selected_item}")
@@ -222,75 +196,67 @@ def show_find_similar_items(df_books, df_movies):
     else:
         st.write(f"Showing **{N}** most different items from: {', '.join(compare_options)}.")
 
-    # Display a table of the top results
-    st.dataframe(df_top[["item", "category", "distance"]])
+    # --- Debug Info ---
+    st.write("### Debug: 'Find Similar Items' Results")
+    st.write(f"df_results shape: {df_results.shape}")
+    st.write(df_results.head(10))
 
-    # Build a multi-bar chart for the top items
-    df_plot_rows = []
-    for _, row in df_top.iterrows():
-        item_name = row["item"]
-        category = row["category"]
+    if df_top.empty:
+        st.warning("No results to display in df_top!")
+    else:
+        st.dataframe(df_top[["item", "category", "distance"]])
 
-        # Find the item in the appropriate df
-        if category == "Book":
-            df_source = df_books
-        else:
-            df_source = df_movies
+        # Build a multi-bar chart
+        df_plot_rows = []
+        for _, row in df_top.iterrows():
+            item_name = row["item"]
+            category = row["category"]
 
-        item_row = df_source[df_source["item"] == item_name]
-        if item_row.empty:
-            continue
+            if category == "Book":
+                df_source = df_books
+            else:
+                df_source = df_movies
 
-        # Extract the 5 OCEAN scores
-        ocean_scores = item_row[OCEAN_COLS].iloc[0]
+            item_row = df_source[df_source["item"] == item_name]
+            if item_row.empty:
+                continue
 
-        # Build a row structure for each trait
-        for trait_col in OCEAN_COLS:
-            # Drop "mean_" for plotting label
-            trait_label = trait_col.replace("mean_", "")
-            df_plot_rows.append({
-                "Item": item_name,
-                "Trait": trait_label,
-                "Score": ocean_scores[trait_col]
-            })
+            ocean_scores = item_row[OCEAN_COLS].iloc[0]
+            for trait_col in OCEAN_COLS:
+                trait_label = trait_col.replace("mean_", "")
+                df_plot_rows.append({
+                    "Item": item_name,
+                    "Trait": trait_label,
+                    "Score": ocean_scores[trait_col]
+                })
 
-    df_plot = pd.DataFrame(df_plot_rows)
-
-    if not df_plot.empty:
-        fig = px.bar(
-            df_plot,
-            x="Trait",
-            y="Score",
-            color="Item",
-            barmode="group",
-            hover_name="Item",
-            title="OCEAN Trait Comparison (Top Matches)"
-        )
-        fig.update_layout(xaxis_title="OCEAN Trait", yaxis_title="Score")
-        st.plotly_chart(fig, use_container_width=True)
+        df_plot = pd.DataFrame(df_plot_rows)
+        if not df_plot.empty:
+            fig = px.bar(
+                df_plot,
+                x="Trait",
+                y="Score",
+                color="Item",
+                barmode="group",
+                hover_name="Item",
+                title="OCEAN Trait Comparison (Top Matches)"
+            )
+            fig.update_layout(xaxis_title="OCEAN Trait", yaxis_title="Score")
+            st.plotly_chart(fig, use_container_width=True)
 
 def show_sort_by_trait(df_books, df_movies):
-    """New functionality: sort items by a chosen trait."""
     st.sidebar.header("Sort by Personality Trait")
 
-    # 1) Choose which trait to sort by
     trait = st.sidebar.selectbox(
         "Select a trait to rank by:",
         OCEAN_COLS, 
-        format_func=lambda x: x.replace("mean_", "")  # nicer display
+        format_func=lambda x: x.replace("mean_", "")
     )
-    
-    # 2) Highest or Lowest
-    order_mode = st.sidebar.radio(
-        "Order by trait value:",
-        ["Highest", "Lowest"]
-    )
-    ascending = (order_mode == "Lowest")  # if user chooses "Lowest," we do ascending
+    order_mode = st.sidebar.radio("Order by trait value:", ["Highest", "Lowest"])
+    ascending = (order_mode == "Lowest")
 
-    # 3) Number of items to show
     N = st.sidebar.slider("Number of items to display:", min_value=1, max_value=50, value=10)
 
-    # 4) Data source(s): Books, Movies, or Both
     data_options = st.sidebar.multiselect(
         "Which data sources?",
         ["Books", "Movies"],
@@ -299,13 +265,19 @@ def show_sort_by_trait(df_books, df_movies):
 
     st.subheader("Sort by Trait Results")
 
-    # Combine or filter books/movies as requested
+    # Combine data, tagging category
     df_books_mod = df_books.copy()
     df_books_mod["category"] = "Book"
     df_movies_mod = df_movies.copy()
     df_movies_mod["category"] = "Movie"
-
     df_combined = pd.concat([df_books_mod, df_movies_mod], ignore_index=True)
+
+    # --- Debug Info ---
+    st.write("### Debug: 'Sort by Trait' Setup")
+    st.write(f"Trait: {trait}, Order: {order_mode}, N: {N}")
+    st.write(f"Data sources chosen: {data_options}")
+    st.write("df_combined shape:", df_combined.shape)
+    st.write(df_combined.head(10))
 
     if not data_options:
         st.warning("No data sources selected.")
@@ -313,22 +285,37 @@ def show_sort_by_trait(df_books, df_movies):
 
     df_filtered = df_combined[df_combined["category"].isin(data_options)]
 
-    # Sort by the chosen trait
+    # --- Debug Info ---
+    st.write("### Debug: After filtering by categories")
+    st.write(f"df_filtered shape: {df_filtered.shape}")
+    st.write(df_filtered.head(10))
+
+    # Sort by chosen trait
     df_sorted = df_filtered.sort_values(by=trait, ascending=ascending)
+
+    # --- Debug Info ---
+    st.write("### Debug: After Sorting by Trait")
+    st.write(f"df_sorted shape: {df_sorted.shape}")
+    st.write(df_sorted.head(10))
+
     df_top = df_sorted.head(N)
 
-    # Display table
+    if df_top.empty:
+        st.warning("No items to show in the top slice!")
+        return
+
     st.write(f"Showing the {order_mode.lower()} **{N}** items based on **{trait.replace('mean_','')}**.")
     st.dataframe(df_top[["item", "category", trait]])
 
-    # Build a multi-bar chart for these top items
+    # Build multi-bar chart
     df_plot_rows = []
     for _, row in df_top.iterrows():
         item_name = row["item"]
         category = row["category"]
         
-        # Extract OCEAN scores from row directly
-        # (they're already in df_top, but for clarity we'll do it from the combined df)
+        # We already have the OCEAN columns in row
+        # but let's confirm each one is present
+        # (just in case data mismatch)
         ocean_scores = row[OCEAN_COLS]
 
         for trait_col in OCEAN_COLS:
@@ -341,8 +328,9 @@ def show_sort_by_trait(df_books, df_movies):
             })
 
     df_plot = pd.DataFrame(df_plot_rows)
-
-    if not df_plot.empty:
+    if df_plot.empty:
+        st.warning("No data for the plot!")
+    else:
         fig = px.bar(
             df_plot,
             x="Trait",
@@ -357,265 +345,3 @@ def show_sort_by_trait(df_books, df_movies):
 
 if __name__ == "__main__":
     main()
-
-
-# import streamlit as st
-# import pandas as pd
-# import numpy as np
-# from sklearn.metrics.pairwise import euclidean_distances
-# import plotly.express as px
-
-# # Import the specific Levenshtein distance function
-# from rapidfuzz.distance import Levenshtein
-
-# # ------------------------------------------------------------------
-# # CONFIG / CONSTANTS
-# # ------------------------------------------------------------------
-# BOOKS_CSV = "books_popular_ocean.csv"
-# MOVIES_CSV = "movies_popular_ocean.csv"
-
-# # OCEAN columns (already normalized in your data, presumably)
-# OCEAN_COLS = [
-#     "mean_Openness", 
-#     "mean_Conscientiousness", 
-#     "mean_Extraversion", 
-#     "mean_Agreeableness", 
-#     "mean_Neuroticism"
-# ]
-
-# # ------------------------------------------------------------------
-# # FUZZY DEDUPLICATION UTILITY
-# # ------------------------------------------------------------------
-# def fuzzy_deduplicate_items(df, col="item", distance_threshold=2):
-#     """
-#     Collapse near-duplicate strings in `df[col]` into canonical forms.
-#     We'll treat two items as duplicates if their Levenshtein distance <= distance_threshold.
-    
-#     Steps:
-#       1. Collect unique items and sort them.
-#       2. Maintain a list of canonical items.
-#       3. For each new item, if it's within distance_threshold of an
-#          existing canonical item, map it to that canonical form.
-#          Otherwise, add it as a new canonical item.
-#       4. Remap all items in df to their canonical forms.
-#       5. Drop duplicates so each final item name appears only once.
-#     """
-#     # Get unique items in ascending order
-#     items = list(df[col].unique())
-#     items.sort()
-
-#     canonical_items = []     # distinct 'master' strings
-#     item_to_canonical = {}   # map each original -> canonical
-
-#     for it in items:
-#         matched_canonical = None
-#         for c in canonical_items:
-#             dist = Levenshtein.distance(it, c)  
-#             if dist <= distance_threshold:
-#                 matched_canonical = c
-#                 break
-        
-#         if matched_canonical is not None:
-#             # We found a canonical item close enough to 'it'
-#             item_to_canonical[it] = matched_canonical
-#         else:
-#             # it becomes a new canonical item
-#             canonical_items.append(it)
-#             item_to_canonical[it] = it
-
-#     # Remap all items in df to the canonical forms
-#     df[col] = df[col].apply(lambda x: item_to_canonical[x])
-
-#     # Optionally drop duplicates (keeping the first row for each canonical item)
-#     df.drop_duplicates(subset=col, keep="first", inplace=True)
-
-#     return df
-
-# # ------------------------------------------------------------------
-# # DATA LOADING & PREPARATION
-# # ------------------------------------------------------------------
-# @st.cache_data
-# def load_data():
-#     """
-#     Load books and movies, ensuring 'item' is deduplicated (fuzzy).
-#     """
-#     df_books = pd.read_csv(BOOKS_CSV)
-#     df_movies = pd.read_csv(MOVIES_CSV)
-
-#     # Convert 'item' to string, fill NaNs, strip whitespace
-#     df_books["item"] = df_books["item"].fillna("").astype(str).str.strip()
-#     df_movies["item"] = df_movies["item"].fillna("").astype(str).str.strip()
-
-#     # Drop empty items
-#     df_books = df_books[df_books["item"] != ""]
-#     df_movies = df_movies[df_movies["item"] != ""]
-
-#     # Fuzzy deduplicate
-#     df_books = fuzzy_deduplicate_items(df_books, col="item", distance_threshold=2)
-#     df_movies = fuzzy_deduplicate_items(df_movies, col="item", distance_threshold=2)
-
-#     return df_books, df_movies
-
-# def get_item_vector(df, item_name):
-#     """
-#     Given a DataFrame (books or movies) and an item_name,
-#     return that row's OCEAN embedding as a 1D numpy array.
-#     If not found, return None.
-#     """
-#     row = df.loc[df["item"] == item_name]
-#     if row.empty:
-#         return None
-#     return row[OCEAN_COLS].values[0]  # shape: (5,)
-
-# def compute_distances(base_vector, df):
-#     """
-#     For each item in df, compute Euclidean distance 
-#     from base_vector, return a DataFrame with columns:
-#       [item, distance].
-#     """
-#     vectors = df[OCEAN_COLS].values  # shape: (num_items, 5)
-#     base_vector_2d = base_vector.reshape(1, -1)
-#     distances = euclidean_distances(base_vector_2d, vectors)[0]  # shape: (num_items,)
-    
-#     dist_df = pd.DataFrame({
-#         "item": df["item"],
-#         "distance": distances
-#     })
-#     return dist_df
-
-# # ------------------------------------------------------------------
-# # STREAMLIT APP
-# # ------------------------------------------------------------------
-# def main():
-#     st.title("Book/Movie Similarity by Big Five Scores")
-
-#     # --- Load data (cached) ---
-#     df_books, df_movies = load_data()
-
-#     st.sidebar.header("Search Settings")
-
-#     # 1) Choose base item type: Book or Movie
-#     item_type = st.sidebar.radio(
-#         "Pick type of base item:",
-#         ("Books", "Movies")
-#     )
-
-#     # 2) Build the dropdown of valid items (sorted)
-#     if item_type == "Books":
-#         valid_items = sorted(df_books["item"].unique())
-#         df_base = df_books
-#     else:
-#         valid_items = sorted(df_movies["item"].unique())
-#         df_base = df_movies
-
-#     selected_item = st.sidebar.selectbox(f"Select a {item_type[:-1]}:", valid_items)
-
-#     # 3) Number of items to show
-#     N = st.sidebar.slider("Number of items to show:", min_value=1, max_value=20, value=5)
-
-#     # 4) Similar or Different
-#     similarity_mode = st.sidebar.radio(
-#         "Show most similar or most different?",
-#         ("Similar", "Different")
-#     )
-
-#     # 5) Compare to Books, Movies, or Both
-#     compare_options = st.sidebar.multiselect(
-#         "Compare against which categories?",
-#         ["Books", "Movies"],
-#         default=["Books", "Movies"]
-#     )
-
-#     # --- Main logic ---
-
-#     # Get the base item vector
-#     base_vector = get_item_vector(df_base, selected_item)
-#     if base_vector is None:
-#         st.error(f"Could not find '{selected_item}' in '{item_type}'.")
-#         return
-
-#     # Compute distances on the fly for each chosen category
-#     result_frames = []
-
-#     if "Books" in compare_options:
-#         dist_books = compute_distances(base_vector, df_books)
-#         dist_books = dist_books[dist_books["item"] != selected_item]
-#         dist_books["category"] = "Book"
-#         result_frames.append(dist_books)
-
-#     if "Movies" in compare_options:
-#         dist_movies = compute_distances(base_vector, df_movies)
-#         dist_movies = dist_movies[dist_movies["item"] != selected_item]
-#         dist_movies["category"] = "Movie"
-#         result_frames.append(dist_movies)
-
-#     if not result_frames:
-#         st.warning("No categories selected to compare against.")
-#         return
-
-#     df_results = pd.concat(result_frames, ignore_index=True)
-
-#     # Sort ascending for "Similar" or descending for "Different"
-#     ascending = (similarity_mode == "Similar")
-#     df_results.sort_values("distance", ascending=ascending, inplace=True)
-
-#     # Take top N
-#     df_top = df_results.head(N)
-
-#     st.subheader(f"Selected {item_type[:-1]}: {selected_item}")
-
-#     if similarity_mode == "Similar":
-#         st.write(f"Showing **{N}** most similar items from: {', '.join(compare_options)}.")
-#     else:
-#         st.write(f"Showing **{N}** most different items from: {', '.join(compare_options)}.")
-
-#     # Display a table of the top results
-#     st.dataframe(df_top[["item", "category", "distance"]])
-
-#     # Build a multi-bar chart for the top items
-#     df_plot_rows = []
-#     for _, row in df_top.iterrows():
-#         item_name = row["item"]
-#         category = row["category"]
-
-#         # Find the item in the appropriate df
-#         if category == "Book":
-#             df_source = df_books
-#         else:
-#             df_source = df_movies
-
-#         item_row = df_source[df_source["item"] == item_name]
-#         if item_row.empty:
-#             continue
-
-#         # Extract the 5 OCEAN scores
-#         ocean_scores = item_row[OCEAN_COLS].iloc[0]
-
-#         # Build a row structure for each trait
-#         for trait_col in OCEAN_COLS:
-#             # Drop "mean_" for plotting label
-#             trait_label = trait_col.replace("mean_", "")
-#             df_plot_rows.append({
-#                 "Item": item_name,
-#                 "Trait": trait_label,
-#                 "Score": ocean_scores[trait_col]
-#             })
-
-#     df_plot = pd.DataFrame(df_plot_rows)
-
-#     if not df_plot.empty:
-#         fig = px.bar(
-#             df_plot,
-#             x="Trait",
-#             y="Score",
-#             color="Item",
-#             barmode="group",
-#             hover_name="Item",
-#             title="OCEAN Trait Comparison"
-#         )
-#         fig.update_layout(xaxis_title="OCEAN Trait", yaxis_title="Score")
-#         st.plotly_chart(fig, use_container_width=True)
-
-
-# if __name__ == "__main__":
-#     main()
